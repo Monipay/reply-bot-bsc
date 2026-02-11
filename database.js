@@ -3,13 +3,30 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
+import { replyToTweet } from './twitter.js';
+import { generateReplyWithBackoff } from './gemini.js';
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY
-);
+let supabase;
 
 const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3', 10);
+
+/**
+ * Initialize the Supabase client
+ */
+export function initSupabase() {
+  supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_KEY
+  );
+  console.log('✅ Supabase initialized [BSC Reply Bot]');
+}
+
+/**
+ * Get the Supabase client instance
+ */
+export function getSupabase() {
+  return supabase;
+}
 
 /**
  * Get unreplied BSC transactions
@@ -53,7 +70,6 @@ export async function markReplied(id, errorReason = null) {
  * Increment retry count
  */
 export async function incrementRetry(id, errorReason) {
-  // First get current retry_count
   const { data } = await supabase
     .from('monibot_transactions')
     .select('retry_count')
@@ -63,7 +79,6 @@ export async function incrementRetry(id, errorReason) {
   const currentRetry = (data?.retry_count || 0) + 1;
   const update = { retry_count: currentRetry, error_reason: errorReason };
 
-  // If max retries reached, also mark as replied
   if (currentRetry >= MAX_RETRIES) {
     update.replied = true;
   }
@@ -79,8 +94,48 @@ export async function incrementRetry(id, errorReason) {
 }
 
 /**
- * Get the Supabase client instance
+ * Process the social reply queue - polls unreplied BSC transactions,
+ * generates AI replies, and posts them to Twitter.
  */
-export function getSupabase() {
-  return supabase;
+export async function processSocialQueue() {
+  const transactions = await getUnrepliedTransactions();
+
+  if (transactions.length === 0) return 0;
+
+  console.log(`📋 [BSC] Processing ${transactions.length} unreplied transaction(s)...`);
+  let processed = 0;
+
+  for (const tx of transactions) {
+    try {
+      if (!tx.tweet_id) {
+        console.log(`  ⏭ Skipping ${tx.id} — no tweet_id`);
+        await markReplied(tx.id, 'SKIP_NO_TWEET_ID');
+        continue;
+      }
+
+      console.log(`  🔄 Replying to tweet ${tx.tweet_id} | type=${tx.type} | ${tx.recipient_pay_tag || 'unknown'}`);
+
+      const replyText = await generateReplyWithBackoff(tx);
+      const replyTweetId = await replyToTweet(tx.tweet_id, replyText);
+
+      console.log(`  ✅ Reply posted: ${replyTweetId}`);
+      await markReplied(tx.id);
+      processed++;
+
+      // Rate limit pause between replies
+      await new Promise(r => setTimeout(r, 3000));
+    } catch (error) {
+      console.error(`  ❌ Failed to reply for tx ${tx.id}:`, error.message);
+
+      if (error.code === 429 || error.message?.includes('429')) {
+        console.log('  🚫 Rate limited. Stopping this cycle.');
+        break;
+      }
+
+      await incrementRetry(tx.id, error.message?.substring(0, 200));
+    }
+  }
+
+  console.log(`📊 [BSC] Cycle complete: ${processed}/${transactions.length} replied`);
+  return processed;
 }
