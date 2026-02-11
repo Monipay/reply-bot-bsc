@@ -77,3 +77,10 @@ export async function incrementRetry(id, errorReason) {
     console.error(`❌ Failed to increment retry for ${id}:`, error.message);
   }
 }
+
+/**
+ * Get the Supabase client instance
+ */
+export function getSupabase() {
+  return supabase;
+}
