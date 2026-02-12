@@ -180,6 +180,10 @@ export async function generateReplyWithBackoff(tx) {
   }
 
   // For success cases, try AI for a more personalized reply
+  // Detect cross-chain reroute: BSC bot handles BSC by default; if it originally came from Base, it was rerouted
+  const txChain = tx.chain || 'BSC';
+  const isRerouted = txChain.toLowerCase() !== 'bsc'; // unlikely but handle it
+  
   const context = {
     ...tx,
     recipient_tag: tx.recipient_pay_tag || 'unknown',
@@ -188,6 +192,8 @@ export async function generateReplyWithBackoff(tx) {
     status: tx.status || 'completed',
     chain: 'BSC',
     token: 'USDT',
+    is_rerouted: isRerouted,
+    original_chain: isRerouted ? 'Base' : '',
     template_type: templateType
   };
   
